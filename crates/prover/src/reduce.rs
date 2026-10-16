@@ -12,6 +12,7 @@ use field::F128;
 use gkr::{GrandProductCircuit, gpgkr_prove};
 use num_traits::ConstOne;
 use poly::eq_table;
+use rayon::prelude::*;
 use transcript::ProverState;
 
 #[inline(never)]
@@ -27,12 +28,15 @@ fn init_circuit(table: &BitTable, fold: &Fold) -> GrandProductCircuit {
         Ok(transposed) => {
             // Transpose wide tables so each row can be read sequentially.
             let transposed = transposed.as_table();
-            for (b, &row_image) in fold.row_images.iter().enumerate() {
-                let leafs = &mut leafs[b * columns..(b + 1) * columns];
-                for (leaf, bit) in leafs.iter_mut().zip(transposed.column_bits(b)) {
-                    *leaf = if bit { row_image } else { F128::ONE };
-                }
-            }
+            leafs
+                .par_chunks_mut(columns)
+                .zip(&fold.row_images)
+                .enumerate()
+                .for_each(|(b, (leafs, &row_image))| {
+                    for (leaf, bit) in leafs.iter_mut().zip(transposed.column_bits(b)) {
+                        *leaf = if bit { row_image } else { F128::ONE };
+                    }
+                });
         }
         Err(TransposeError::ColumnCountTooNarrow) => {
             // Narrow tables cannot form packed columns after transposition.

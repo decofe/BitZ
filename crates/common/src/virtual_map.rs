@@ -62,6 +62,16 @@ pub trait VirtualMap {
     /// The result has `f_len() - 1` bit weights and the constant-column weight.
     fn transpose(&self, weights: &[F128]) -> Result<TransposedWeights, VirtualMapError>;
 
+    /// [`Self::transpose`] of the tensor weights `weights[c * R + r] =
+    /// columns[c] * rows[r]` with `R = rows.len()`, without materializing them.
+    fn transpose_factored(
+        &self,
+        rows: &[F128],
+        columns: &[F128],
+    ) -> Result<TransposedWeights, VirtualMapError> {
+        self.transpose(&flatten(rows, columns))
+    }
+
     /// Binds the map into the statement frame.
     ///
     /// Must cover the shape and every nonzero: equal digests are treated as
@@ -162,12 +172,12 @@ impl<'a, const Q: u128, M: VirtualMap> VirtualStatement<'a, Q, M> {
     /// weights with column weight one.
     pub fn transpose_query(&self, query: OpeningQuery) -> Result<OpeningQuery, VirtualMapError> {
         let shape = self.params.claim().shape();
-        let (weights, target) = match query {
+        let (transposed, target) = match &query {
             OpeningQuery::Mle { point, target } => {
                 if point.len() != shape.log_bits() {
                     return Err(VirtualMapError::PointLengthMismatch);
                 }
-                (poly::eq_table(&point), target)
+                (self.map.transpose(&poly::eq_table(point))?, *target)
             }
             OpeningQuery::InnerProduct { claim } => {
                 if claim.row_weights().len() != shape.rows()
@@ -176,13 +186,12 @@ impl<'a, const Q: u128, M: VirtualMap> VirtualStatement<'a, Q, M> {
                     return Err(VirtualMapError::ClaimWeightCountMismatch);
                 }
                 (
-                    flatten(claim.row_weights(), claim.column_weights()),
+                    self.map
+                        .transpose_factored(claim.row_weights(), claim.column_weights())?,
                     claim.target(),
                 )
             }
         };
-        let transposed = self.map.transpose(&weights)?;
-        drop(weights);
         if Some(transposed.weights().len()) != self.map.f_len().checked_sub(1) {
             return Err(VirtualMapError::WeightCountMismatch);
         }
@@ -203,7 +212,7 @@ impl<'a, const Q: u128, M: VirtualMap> VirtualStatement<'a, Q, M> {
 
 /// `row_weights (x) column_weights` written out per bit of `h`, one column
 /// after another.
-fn flatten(row_weights: &[F128], column_weights: &[F128]) -> Vec<F128> {
+pub fn flatten(row_weights: &[F128], column_weights: &[F128]) -> Vec<F128> {
     let mut weights = vec![F128::ZERO; row_weights.len() * column_weights.len()];
     let process_column = |(slot, &scale): (&mut [F128], &F128)| {
         for (weight, &row) in slot.iter_mut().zip(row_weights) {

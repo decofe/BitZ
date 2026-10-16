@@ -386,6 +386,54 @@ impl VirtualMap for MaterializedMTranspose {
         Ok(TransposedWeights::new(on_bits, transposed[0]))
     }
 
+    fn transpose_factored(
+        &self,
+        rows: &[F128],
+        columns: &[F128],
+    ) -> Result<TransposedWeights, VirtualMapError> {
+        if !rows.len().is_power_of_two()
+            || rows
+                .len()
+                .checked_mul(columns.len())
+                .is_none_or(|len| len < self.row_count)
+        {
+            return Err(VirtualMapError::WeightCountMismatch);
+        }
+        let row_bits = rows.len().trailing_zeros();
+        let row_mask = rows.len() - 1;
+        // Within one output column the row indices ascend, so runs that share
+        // a weight column are summed first and multiplied once.
+        let evaluate = |column: usize| {
+            let start = self.column_offsets[column] as usize;
+            let end = self.column_offsets[column + 1] as usize;
+            let mut total = F128::new(0, 0);
+            let mut run = F128::new(0, 0);
+            let mut run_column = usize::MAX;
+            for &row in &self.row_indices[start..end] {
+                let row = row as usize;
+                let weight_column = row >> row_bits;
+                if weight_column != run_column {
+                    if run_column != usize::MAX {
+                        total += run * columns[run_column];
+                    }
+                    run = F128::new(0, 0);
+                    run_column = weight_column;
+                }
+                run += rows[row & row_mask];
+            }
+            if run_column != usize::MAX {
+                total += run * columns[run_column];
+            }
+            total
+        };
+        let mut transposed: Vec<F128> = (0..self.column_count())
+            .into_par_iter()
+            .map(evaluate)
+            .collect();
+        let on_bits = transposed.split_off(1);
+        Ok(TransposedWeights::new(on_bits, transposed[0]))
+    }
+
     fn digest(&self) -> [u8; 32] {
         *self.digest.get_or_init(|| self.compute_digest())
     }
@@ -682,6 +730,25 @@ mod tests {
         assert_eq!(transpose.row_count(), 20_457);
         assert_eq!(transpose.nonzero_count(), 42_361);
         assert!(transpose.payload_bytes() < 194 * 1024);
+    }
+
+    /// The factored transpose must agree with transposing the flattened tensor.
+    #[test]
+    fn factored_transpose_matches_the_flattened_weights() {
+        let mut materializer = MTransposeGenerator::new(COMPRESSION_INPUT_BITS);
+        let inputs = materializer.take_boxed_inputs();
+        let _ = compression_circuit(&mut materializer, inputs.as_ref().try_into().unwrap());
+        let map = materializer.finish();
+        let rows = challenges(1 << 6);
+        let columns: Vec<F128> = challenges(map.h_len().div_ceil(rows.len()) + 3)
+            .into_iter()
+            .map(|weight| weight * F128::new(3, 7))
+            .collect();
+        let flattened = common::flatten(&rows, &columns);
+        assert_eq!(
+            map.transpose_factored(&rows, &columns).unwrap(),
+            map.transpose(&flattened).unwrap()
+        );
     }
 
     #[test]

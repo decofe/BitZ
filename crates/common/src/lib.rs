@@ -24,6 +24,7 @@ pub use shape::{Shape, ShapeError};
 pub use table::{BitTable, TableError, TransposeError, TransposedBitTable};
 pub use virtual_map::{
     TransposedWeights, VirtualMap, VirtualMapError, VirtualStatement, VirtualStatementError,
+    flatten,
 };
 
 use crypto_primitives::Semiring;

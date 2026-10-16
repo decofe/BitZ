@@ -1214,6 +1214,7 @@ dependencies = [
  "pcs",
  "poly",
  "rand 0.10.2",
+ "rayon",
  "tracing",
  "transcript",
 ]

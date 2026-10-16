@@ -378,7 +378,7 @@ impl GrandProductCircuit {
         while prev_eval.len() > groups {
             let mid = prev_eval.len() / 2;
             let (l, r) = prev_eval.split_at(mid);
-            let eval: Vec<Field> = l.iter().zip(r).map(|(&a, &b)| a * b).collect();
+            let eval: Vec<Field> = l.par_iter().zip(r).map(|(&a, &b)| a * b).collect();
             witnesses.push(prev_eval);
             prev_eval = eval;
         }

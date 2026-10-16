@@ -2,6 +2,8 @@
 
 use crate::{Shape, ShapeError};
 use field::F128;
+#[cfg(feature = "parallel")]
+use rayon::prelude::*;
 
 /// Bits in a packed element, and the shift that divides an index into element
 /// and offset.
@@ -157,8 +159,9 @@ impl<'a> BitTable<'a> {
         debug_assert_eq!(row_groups * column_groups * PACKED_BITS, self.packed.len());
 
         let mut packed = F128::zeroed_vec(self.packed.len());
-        let mut block = [0u128; PACKED_BITS];
-        for row_group in 0..row_groups {
+        // Each row group writes its own `PACKED_BITS` output rows.
+        let transpose_group = |(row_group, out): (usize, &mut [F128])| {
+            let mut block = [0u128; PACKED_BITS];
             for column_group in 0..column_groups {
                 for (lane, word) in block.iter_mut().enumerate() {
                     let column = column_group * PACKED_BITS + lane;
@@ -169,12 +172,21 @@ impl<'a> BitTable<'a> {
                 transpose_bit_block(&mut block);
 
                 for (lane, &word) in block.iter().enumerate() {
-                    let row = row_group * PACKED_BITS + lane;
-                    packed[row * column_groups + column_group] =
+                    out[lane * column_groups + column_group] =
                         F128::new(word as u64, (word >> HALF_BITS) as u64);
                 }
             }
-        }
+        };
+        #[cfg(feature = "parallel")]
+        packed
+            .par_chunks_mut(PACKED_BITS * column_groups)
+            .enumerate()
+            .for_each(transpose_group);
+        #[cfg(not(feature = "parallel"))]
+        packed
+            .chunks_mut(PACKED_BITS * column_groups)
+            .enumerate()
+            .for_each(transpose_group);
 
         Ok(TransposedBitTable { shape, packed })
     }
