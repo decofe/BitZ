@@ -34,6 +34,17 @@ pub trait CircuitStatement {
     fn public_bytes(&self) -> Vec<u8>;
     fn input_bits(&self) -> usize;
     fn synthesize<C: Circuit>(&self, cs: &mut C, inputs: &[C::Bool]) -> Result<(), Error>;
+
+    /// Values the leading input bits must take, checked by a PCS opening
+    /// rather than by circuit constants.
+    ///
+    /// When the circuit's constraints do not otherwise depend on the
+    /// statement, one [`CircuitProofSystem`] serves every statement of the
+    /// same shape through [`CircuitProofSystem::set_statement`]. Requires the
+    /// virtual opening path, whose committed witness starts with the inputs.
+    fn public_input_bits(&self) -> Vec<bool> {
+        Vec::new()
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -164,6 +175,15 @@ impl<S: CircuitStatement> CircuitProofSystem<S> {
         })
     }
 
+    /// Replaces the statement without rebuilding the constraint system.
+    ///
+    /// Sound only for statements whose `synthesize` emits identical
+    /// constraints, which holds when every statement-dependent value enters
+    /// through [`CircuitStatement::public_input_bits`].
+    pub fn set_statement(&mut self, statement: S) {
+        self.statement = statement;
+    }
+
     pub fn stats(&self) -> CircuitStats {
         CircuitStats {
             opening_path: self.opening_path,
@@ -235,6 +255,17 @@ impl<S: CircuitStatement> CircuitProofSystem<S> {
         } = commitment;
         let root = data.root();
         self.bind(&mut transcript, root);
+        if let Some(query) = self.public_query(&mut transcript)? {
+            self.pcs
+                .prove_lin(
+                    &data,
+                    witness.committed.clone(),
+                    &query,
+                    StatementBinding::Bind,
+                    &mut transcript,
+                )
+                .map_err(Error::ConstantProve)?;
+        }
         if self.opening_path == OpeningPath::Direct {
             self.pcs
                 .prove_lin(
@@ -291,6 +322,11 @@ impl<S: CircuitStatement> CircuitProofSystem<S> {
             .receive_commitment(proof.root, &mut transcript)
             .map_err(Error::CommitmentVerify)?;
         self.bind(&mut transcript, proof.root);
+        if let Some(query) = self.public_query(&mut transcript)? {
+            self.pcs
+                .verify_lin(&commitment, &query, StatementBinding::Bind, &mut transcript)
+                .map_err(Error::ConstantVerify)?;
+        }
         if self.opening_path == OpeningPath::Direct {
             self.pcs
                 .verify_lin(
@@ -315,6 +351,46 @@ impl<S: CircuitStatement> CircuitProofSystem<S> {
             }
         }
         .map_err(Error::Verify)
+    }
+
+    /// Batches the public input bits into one multilinear claim on the
+    /// committed witness: at a random point `r` on the low coordinates and zero
+    /// elsewhere, the committed MLE is `sum_i eq(r, i) * public[i]`. A wrong
+    /// bit survives with probability at most `log2(len) / 2^128`.
+    fn public_query(
+        &self,
+        transcript: &mut impl PublicTranscript,
+    ) -> Result<Option<OpeningQuery>, Error> {
+        let public = self.statement.public_input_bits();
+        if public.is_empty() {
+            return Ok(None);
+        }
+        if self.opening_path != OpeningPath::Virtual {
+            return Err(Error::Configuration(
+                "public inputs need the virtual opening path",
+            ));
+        }
+        if public.len() > self.statement.input_bits() {
+            return Err(Error::Input("more public bits than inputs"));
+        }
+        let vars = public.len().next_power_of_two().ilog2() as usize;
+        let mut point: Vec<F128> = (0..vars)
+            .map(|_| transcript.verifier_message_f128())
+            .collect();
+        let mut target = F128::ZERO;
+        for (index, _) in public.iter().enumerate().filter(|(_, bit)| **bit) {
+            target += (0..vars)
+                .map(|var| {
+                    if index >> var & 1 == 1 {
+                        point[var]
+                    } else {
+                        F128::ONE + point[var]
+                    }
+                })
+                .product::<F128>();
+        }
+        point.resize(self.committed_shape.log_bits(), F128::ZERO);
+        Ok(Some(OpeningQuery::Mle { point, target }))
     }
 
     // Direct commitment includes h[0]; unlike the virtual map, it does not
