@@ -150,7 +150,11 @@ impl<S: CircuitStatement> CircuitProofSystem<S> {
         if map.f_len() != matrices.matrices().m.column_count() {
             return Err(Error::Configuration("map and witness dimensions differ"));
         }
-        let claim_shape = shape_for(map.h_len())?;
+        // The fold sends one element per column. The reference split (3/5
+        // of the bits on rows) keeps that vector, and the GKR over columns,
+        // small; 128-bit rows made it most of the proof.
+        let claim_shape = Shape::for_log_bits(shape_for(map.h_len())?.log_bits())
+            .map_err(|_| Error::Configuration("witness shape outside supported range"))?;
         let opening_path = if is_identity(&matrices.matrices().m) {
             OpeningPath::Direct
         } else {
