@@ -21,11 +21,20 @@ use num_traits::{
 // Always compiled: the active kernel where no carryless-multiply instruction
 // exists, and the oracle the SIMD kernels are tested against. On aarch64 only
 // tests call it, hence the allow.
-#[cfg_attr(all(target_arch = "aarch64", target_feature = "aes"), allow(dead_code))]
+#[cfg_attr(
+    any(
+        all(target_arch = "aarch64", target_feature = "aes"),
+        all(target_arch = "x86_64", target_feature = "pclmulqdq")
+    ),
+    allow(dead_code)
+)]
 mod portable;
 
 #[cfg(all(target_arch = "aarch64", target_feature = "aes"))]
 mod aarch64;
+
+#[cfg(all(target_arch = "x86_64", target_feature = "pclmulqdq"))]
+mod x86_64;
 
 mod pow;
 mod wide;
@@ -38,13 +47,23 @@ pub use wide::Wide256;
 // not for `aarch64-unknown-linux-gnu`, which silently gets `portable`.
 #[cfg(all(target_arch = "aarch64", target_feature = "aes"))]
 use aarch64 as kernel;
-#[cfg(not(all(target_arch = "aarch64", target_feature = "aes")))]
+#[cfg(not(any(
+    all(target_arch = "aarch64", target_feature = "aes"),
+    all(target_arch = "x86_64", target_feature = "pclmulqdq")
+)))]
 use portable as kernel;
+#[cfg(all(target_arch = "x86_64", target_feature = "pclmulqdq"))]
+use x86_64 as kernel;
 
 /// Which kernel this build selected. A timing means nothing without it.
 #[cfg(all(target_arch = "aarch64", target_feature = "aes"))]
 pub const KERNEL: &str = "neon";
-#[cfg(not(all(target_arch = "aarch64", target_feature = "aes")))]
+#[cfg(all(target_arch = "x86_64", target_feature = "pclmulqdq"))]
+pub const KERNEL: &str = "pclmulqdq";
+#[cfg(not(any(
+    all(target_arch = "aarch64", target_feature = "aes"),
+    all(target_arch = "x86_64", target_feature = "pclmulqdq")
+)))]
 pub const KERNEL: &str = "portable";
 
 /// Low bits of the reduction polynomial: `X^128 = X^7 + X^2 + X + 1`.
@@ -527,6 +546,58 @@ mod tests {
             for k in [0, 1, 6, 24, 48, 127] {
                 assert_eq!(
                     aarch64::square_n(a.words(), k),
+                    portable::square_n(a.words(), k),
+                    "square_n({k}) disagrees on {a:?}"
+                );
+            }
+        }
+    }
+
+    #[cfg(all(target_arch = "x86_64", target_feature = "pclmulqdq"))]
+    #[test]
+    fn pclmulqdq_matches_portable() {
+        let edges = [
+            F128::ZERO,
+            F128::ONE,
+            F128::GENERATOR,
+            F128::new(REDUCTION, 0),
+            F128::new(1 << 63, 0),
+            F128::new(0, 1),
+            F128::new(0, 1 << 63),
+            F128::new(u64::MAX, u64::MAX),
+        ];
+
+        let mut rng = Pcg64::seed_from_u64(9);
+        let mut cases: Vec<(F128, F128)> = Vec::new();
+        for &a in &edges {
+            for &b in &edges {
+                cases.push((a, b));
+            }
+            for _ in 0..64 {
+                cases.push((a, f128(&mut rng)));
+                cases.push((f128(&mut rng), a));
+            }
+        }
+        for _ in 0..2048 {
+            cases.push((f128(&mut rng), f128(&mut rng)));
+        }
+
+        for (a, b) in cases {
+            assert_eq!(
+                x86_64::mul(a.words(), b.words()),
+                portable::mul(a.words(), b.words()),
+                "multiply disagrees on {a:?} * {b:?}"
+            );
+            assert_eq!(
+                x86_64::square(a.words()),
+                portable::square(a.words()),
+                "square disagrees on {a:?}"
+            );
+            // The squaring runs are separate loops on each side, so they are
+            // checked against each other rather than only against `square`.
+            for k in [0, 1, 6, 24, 48, 127] {
+                assert_eq!(
+                    x86_64::square_n(a.words(), k),
                     portable::square_n(a.words(), k),
                     "square_n({k}) disagrees on {a:?}"
                 );
