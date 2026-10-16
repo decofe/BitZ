@@ -269,6 +269,7 @@ impl MTransposeRecorder {
             row_count,
             column_offsets: column_offsets.into_boxed_slice(),
             row_indices: row_indices.into_boxed_slice(),
+            digest: std::sync::OnceLock::new(),
         }
     }
 }
@@ -279,6 +280,9 @@ pub struct MaterializedMTranspose {
     row_count: usize,
     column_offsets: Box<[u32]>,
     row_indices: Box<[u32]>,
+    /// The map is immutable, so its digest is hashed once and reused by every
+    /// proof and verification that binds it.
+    digest: std::sync::OnceLock<[u8; 32]>,
 }
 
 impl MaterializedMTranspose {
@@ -383,6 +387,20 @@ impl VirtualMap for MaterializedMTranspose {
     }
 
     fn digest(&self) -> [u8; 32] {
+        *self.digest.get_or_init(|| self.compute_digest())
+    }
+
+    fn h_len(&self) -> usize {
+        self.row_count
+    }
+
+    fn f_len(&self) -> usize {
+        self.column_count()
+    }
+}
+
+impl MaterializedMTranspose {
+    fn compute_digest(&self) -> [u8; 32] {
         let mut hasher = blake3::Hasher::new();
         hasher.update(DIGEST_DOMAIN);
         for count in [self.row_count, self.column_count(), self.nonzero_count()] {
@@ -399,14 +417,6 @@ impl VirtualMap for MaterializedMTranspose {
             }
         }
         *hasher.finalize().as_bytes()
-    }
-
-    fn h_len(&self) -> usize {
-        self.row_count
-    }
-
-    fn f_len(&self) -> usize {
-        self.column_count()
     }
 }
 
